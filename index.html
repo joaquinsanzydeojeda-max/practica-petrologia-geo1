@@ -193,8 +193,6 @@ const $=id=>document.getElementById(id);
 
 function shuffle(a){return [...a].sort(()=>Math.random()-0.5)}
 async function startQuiz(){
-  const access=await validateStudentSession(true);
-  if(!access) return;
   const fields=['mat','name','surname','group','subgroup'];
   if(fields.some(x=>!$(x).value.trim())){alert('Completa todos los campos.');return}
   const matricula=$('mat').value.trim();
@@ -377,7 +375,7 @@ function startQRCountdown(expiresAt){
     const totalSec=Math.ceil(left/1000);
     const min=Math.floor(totalSec/60);
     const sec=totalSec%60;
-    if(status) status.textContent=left>0?`QR activo · caduca en ${min}:${String(sec).padStart(2,'0')}`:'QR caducado · crea uno nuevo para permitir el acceso';
+    if(status) status.textContent=left>0?`QR activo · caduca en ${min}:${String(sec).padStart(2,'0')}`:'QR caducado · crea uno nuevo para mostrar otro QR';
     if(left<=0 && qrCountdownTimer){clearInterval(qrCountdownTimer);qrCountdownTimer=null;}
   };
   tick();
@@ -412,7 +410,7 @@ async function loadCurrentQR(){
     if(expiresAt<=Date.now()){
       const p=$('qrPanel'); if(p) p.classList.remove('hidden');
       const q=$('qrcode'); if(q) q.innerHTML='';
-      const st=$('qrStatus'); if(st) st.textContent='QR caducado · crea uno nuevo para permitir el acceso';
+      const st=$('qrStatus'); if(st) st.textContent='QR caducado · crea uno nuevo para mostrar otro QR';
       const l=$('qrLink'); if(l) l.textContent='';
       return;
     }
@@ -422,24 +420,20 @@ async function loadCurrentQR(){
 }
 async function validateStudentSession(showMessage=false){
   const token=new URLSearchParams(location.search).get('sesion');
-  if(!token){
-    if(showMessage) alert('Para entrar al cuestionario debes escanear el QR activo que muestra el profesor.');
-    return false;
-  }
+  if(!token) return true;
   try{
     const snap=await db.collection('config').doc('general').get();
-    if(!snap.exists){if(showMessage) alert('No hay ningún acceso QR activo. Pide al profesor que genere uno nuevo.');return false;}
+    if(!snap.exists) return true;
     const d=snap.data();
     const expiresAt=d.qrExpiresAt && typeof d.qrExpiresAt.toMillis==='function'?d.qrExpiresAt.toMillis():0;
     const valid=d.qrToken===token && expiresAt>Date.now();
     if(!valid && showMessage){
-      alert(expiresAt && expiresAt<=Date.now()?'Este QR ha caducado. Pide al profesor que genere uno nuevo.':'Este QR ya no es válido. Pide al profesor que genere uno nuevo.');
+      alert('Este QR ya ha caducado, pero puedes seguir accediendo al cuestionario mediante el enlace normal.');
     }
-    return valid;
+    return true;
   }catch(e){
     console.error(e);
-    if(showMessage) alert('No se ha podido validar el acceso. Comprueba la conexión a Internet.');
-    return false;
+    return true;
   }
 }
 async function updateAttemptStatus(){
@@ -519,21 +513,38 @@ async function clearResults(){
 (async function(){
   const notice=document.getElementById('studentAccessNotice');
   const startBtn=document.getElementById('studentStartBtn');
-  if(!notice || !startBtn) return;
+  if(!startBtn) return;
+
+  // El enlace normal siempre permite acceder al cuestionario.
+  startBtn.disabled=false;
+  startBtn.style.opacity='1';
+  startBtn.style.cursor='pointer';
+
+  // Si se ha entrado mediante un QR, solo mostramos información sobre su vigencia.
   const token=new URLSearchParams(location.search).get('sesion');
-  notice.style.display='block';
+  if(!notice) return;
+
   if(!token){
-    startBtn.disabled=true;
-    startBtn.style.opacity='.55';
-    startBtn.style.cursor='not-allowed';
-    notice.textContent='Acceso cerrado. Escanea el QR activo que muestra el profesor para entrar al cuestionario.';
+    notice.style.display='none';
     return;
   }
-  const ok=await validateStudentSession(false);
-  startBtn.disabled=!ok;
-  startBtn.style.opacity=ok?'1':'.55';
-  startBtn.style.cursor=ok?'pointer':'not-allowed';
-  notice.textContent=ok?'Acceso QR válido durante la sesión. Puedes comenzar el cuestionario.':'El QR no es válido o ha caducado. Pide al profesor que genere uno nuevo.';
+
+  try{
+    const snap=await db.collection('config').doc('general').get();
+    const d=snap.exists ? snap.data() : {};
+    const expiresAt=d.qrExpiresAt && typeof d.qrExpiresAt.toMillis==='function'
+      ? d.qrExpiresAt.toMillis()
+      : 0;
+    const valid=d.qrToken===token && expiresAt>Date.now();
+
+    notice.style.display='block';
+    notice.textContent=valid
+      ? 'Has accedido mediante el QR del profesor. Puedes comenzar el cuestionario.'
+      : 'El QR utilizado ya ha caducado. El cuestionario sigue disponible mediante el enlace normal.';
+  }catch(e){
+    console.error(e);
+    notice.style.display='none';
+  }
 })();
 </script>
 <script>
