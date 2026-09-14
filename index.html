@@ -96,6 +96,7 @@ body{background:#0d1714}
     <section id="start" class="card">
       <div class="institution-strip"><div class="upm-chip">UPM</div><div class="institution-text">Escuela Técnica Superior de Ingenieros de Caminos, Canales y Puertos<br>Laboratorio de Geología y Morfología del Terreno</div></div>
       <h2>Datos del alumno</h2>
+      <div id="studentAccessNotice" class="notice small" style="display:none"></div>
       <p class="muted">Completa tus datos para acceder a las preguntas. La selección de rocas será aleatoria.</p>
       <div class="grid">
       <div><label for="mat">Matrícula</label><input id="mat" autocomplete="off" inputmode="numeric"></div>
@@ -105,7 +106,7 @@ body{background:#0d1714}
       <div><label for="subgroup">Subgrupo</label><select id="subgroup"><option value="">Selecciona...</option><option>1</option><option>2</option><option>3</option><option>4</option></select></div>
       </div>
       <div class="notice small">6 rocas · 2 preguntas por roca · 10 segundos por pregunta.</div>
-      <button class="primary" onclick="startQuiz()">Comenzar cuestionario</button>
+      <button id="studentStartBtn" class="primary" onclick="startQuiz()">Comenzar cuestionario</button>
       <button class="secondary" style="margin-top:10px;width:100%" onclick="showTeacher()">Acceso profesor</button>
     </section>
   </div>
@@ -139,6 +140,16 @@ body{background:#0d1714}
 <button class="secondary" style="margin-top:10px;width:100%" onclick="backToStart()">Volver al inicio</button>
 <div id="teacherPanel" class="hidden" style="margin-top:20px">
   <div style="padding:14px;border:1px solid var(--line);border-radius:12px;background:#fff;margin-bottom:14px">
+    <label style="margin-top:0">Acceso de alumnos mediante QR</label>
+    <p class="muted" style="margin:6px 0 10px">Genera un QR válido durante 30 minutos. Al crear uno nuevo, el anterior deja de ser válido.</p>
+    <button class="secondary" style="width:100%" onclick="createStudentQR()">Crear nuevo QR (30 minutos)</button>
+    <div id="qrPanel" class="hidden" style="margin-top:14px;text-align:center">
+      <div id="qrcode" style="display:inline-block;padding:14px;background:#fff;border:1px solid var(--line);border-radius:12px"></div>
+      <div id="qrStatus" class="muted" style="margin-top:10px;font-weight:700"></div>
+      <div id="qrLink" class="small" style="margin-top:6px;word-break:break-all"></div>
+    </div>
+  </div>
+  <div style="padding:14px;border:1px solid var(--line);border-radius:12px;background:#fff;margin-bottom:14px">
     <label style="margin-top:0">Número de intentos por alumno</label>
     <div style="display:grid;grid-template-columns:minmax(110px,180px) 1fr;gap:10px;align-items:end">
       <input id="maxAttemptsInput" type="number" min="1" max="20" step="1" value="1">
@@ -158,6 +169,7 @@ body{background:#0d1714}
 <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore-compat.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script>
 const firebaseConfig = {
   apiKey: "AIzaSyB9WragqoKKdJiozkY4atFJNkv2PqSjQoA",
@@ -176,10 +188,13 @@ const ROCKS = [{"name": "Granito", "type": "Ígnea", "img": "data:image/jpeg;bas
 let student={}, selected=[], questions=[], qi=0, seconds=10, interval=null, startedAt=null;
 let teacherUnlocked=false;
 let cachedResults=[];
+let qrCountdownTimer=null;
 const $=id=>document.getElementById(id);
 
 function shuffle(a){return [...a].sort(()=>Math.random()-0.5)}
 async function startQuiz(){
+  const access=await validateStudentSession(true);
+  if(!access) return;
   const fields=['mat','name','surname','group','subgroup'];
   if(fields.some(x=>!$(x).value.trim())){alert('Completa todos los campos.');return}
   const matricula=$('mat').value.trim();
@@ -299,7 +314,7 @@ async function loginTeacher(){
     teacherUnlocked=true;
     $('teacherPanel').classList.remove('hidden');
     $('teacherPass').value='';
-    await Promise.all([renderResults(),updateAttemptStatus()]);
+    await Promise.all([renderResults(),updateAttemptStatus(),loadCurrentQR()]);
   }catch(e){
     console.error(e);
     alert('Correo o contraseña incorrectos.');
@@ -308,6 +323,7 @@ async function loginTeacher(){
 async function backToStart(){
   try{ if(auth.currentUser) await auth.signOut(); }catch(e){}
   teacherUnlocked=false;
+  if(qrCountdownTimer){clearInterval(qrCountdownTimer);qrCountdownTimer=null;}
   $('teacherPanel').classList.add('hidden');
   $('teacher').classList.add('hidden');
   $('finish').classList.add('hidden');
@@ -332,6 +348,100 @@ async function renderResults(){
   }
 }
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function makeRandomToken(){
+  const arr=new Uint8Array(24);
+  crypto.getRandomValues(arr);
+  return Array.from(arr,b=>b.toString(16).padStart(2,'0')).join('');
+}
+function studentBaseUrl(){
+  return location.origin+location.pathname;
+}
+function renderQR(url,expiresAt){
+  const panel=$('qrPanel'), box=$('qrcode'), link=$('qrLink');
+  if(!panel || !box) return;
+  panel.classList.remove('hidden');
+  box.innerHTML='';
+  if(typeof QRCode==='undefined'){
+    box.innerHTML='<div class="notice">No se ha podido cargar el generador de QR. Puedes compartir el enlace mostrado debajo.</div>';
+  }else{
+    new QRCode(box,{text:url,width:260,height:260,correctLevel:QRCode.CorrectLevel.M});
+  }
+  if(link) link.textContent=url;
+  startQRCountdown(expiresAt);
+}
+function startQRCountdown(expiresAt){
+  if(qrCountdownTimer) clearInterval(qrCountdownTimer);
+  const status=$('qrStatus');
+  const tick=()=>{
+    const left=Math.max(0,expiresAt-Date.now());
+    const totalSec=Math.ceil(left/1000);
+    const min=Math.floor(totalSec/60);
+    const sec=totalSec%60;
+    if(status) status.textContent=left>0?`QR activo · caduca en ${min}:${String(sec).padStart(2,'0')}`:'QR caducado · crea uno nuevo para permitir el acceso';
+    if(left<=0 && qrCountdownTimer){clearInterval(qrCountdownTimer);qrCountdownTimer=null;}
+  };
+  tick();
+  qrCountdownTimer=setInterval(tick,1000);
+}
+async function createStudentQR(){
+  if(!teacherUnlocked || !auth.currentUser){alert('Esta acción está reservada al profesor.');return}
+  try{
+    const token=makeRandomToken();
+    const expiresAt=Date.now()+30*60*1000;
+    await db.collection('config').doc('general').set({
+      qrToken:token,
+      qrExpiresAt:firebase.firestore.Timestamp.fromMillis(expiresAt),
+      qrCreatedAt:firebase.firestore.FieldValue.serverTimestamp(),
+      updatedAt:firebase.firestore.FieldValue.serverTimestamp()
+    },{merge:true});
+    const url=studentBaseUrl()+'?sesion='+encodeURIComponent(token);
+    renderQR(url,expiresAt);
+  }catch(e){
+    console.error(e);
+    alert('No se ha podido crear el QR. Revisa la conexión a Internet.');
+  }
+}
+async function loadCurrentQR(){
+  if(!teacherUnlocked || !auth.currentUser) return;
+  try{
+    const snap=await db.collection('config').doc('general').get();
+    if(!snap.exists) return;
+    const d=snap.data();
+    if(!d.qrToken || !d.qrExpiresAt) return;
+    const expiresAt=typeof d.qrExpiresAt.toMillis==='function'?d.qrExpiresAt.toMillis():0;
+    if(expiresAt<=Date.now()){
+      const p=$('qrPanel'); if(p) p.classList.remove('hidden');
+      const q=$('qrcode'); if(q) q.innerHTML='';
+      const st=$('qrStatus'); if(st) st.textContent='QR caducado · crea uno nuevo para permitir el acceso';
+      const l=$('qrLink'); if(l) l.textContent='';
+      return;
+    }
+    const url=studentBaseUrl()+'?sesion='+encodeURIComponent(d.qrToken);
+    renderQR(url,expiresAt);
+  }catch(e){console.error(e)}
+}
+async function validateStudentSession(showMessage=false){
+  const token=new URLSearchParams(location.search).get('sesion');
+  if(!token){
+    if(showMessage) alert('Para entrar al cuestionario debes escanear el QR activo que muestra el profesor.');
+    return false;
+  }
+  try{
+    const snap=await db.collection('config').doc('general').get();
+    if(!snap.exists){if(showMessage) alert('No hay ningún acceso QR activo. Pide al profesor que genere uno nuevo.');return false;}
+    const d=snap.data();
+    const expiresAt=d.qrExpiresAt && typeof d.qrExpiresAt.toMillis==='function'?d.qrExpiresAt.toMillis():0;
+    const valid=d.qrToken===token && expiresAt>Date.now();
+    if(!valid && showMessage){
+      alert(expiresAt && expiresAt<=Date.now()?'Este QR ha caducado. Pide al profesor que genere uno nuevo.':'Este QR ya no es válido. Pide al profesor que genere uno nuevo.');
+    }
+    return valid;
+  }catch(e){
+    console.error(e);
+    if(showMessage) alert('No se ha podido validar el acceso. Comprueba la conexión a Internet.');
+    return false;
+  }
+}
 async function updateAttemptStatus(){
   try{
     const snap=await db.collection('config').doc('general').get();
@@ -404,6 +514,27 @@ async function clearResults(){
     alert('No se han podido borrar todos los resultados. Revisa las reglas de Firestore.');
   }
 }
+</script>
+<script>
+(async function(){
+  const notice=document.getElementById('studentAccessNotice');
+  const startBtn=document.getElementById('studentStartBtn');
+  if(!notice || !startBtn) return;
+  const token=new URLSearchParams(location.search).get('sesion');
+  notice.style.display='block';
+  if(!token){
+    startBtn.disabled=true;
+    startBtn.style.opacity='.55';
+    startBtn.style.cursor='not-allowed';
+    notice.textContent='Acceso cerrado. Escanea el QR activo que muestra el profesor para entrar al cuestionario.';
+    return;
+  }
+  const ok=await validateStudentSession(false);
+  startBtn.disabled=!ok;
+  startBtn.style.opacity=ok?'1':'.55';
+  startBtn.style.cursor=ok?'pointer':'not-allowed';
+  notice.textContent=ok?'Acceso QR válido durante la sesión. Puedes comenzar el cuestionario.':'El QR no es válido o ha caducado. Pide al profesor que genere uno nuevo.';
+})();
 </script>
 <script>
 (function(){
